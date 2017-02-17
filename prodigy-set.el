@@ -52,16 +52,16 @@
 (defvar prodigy-set-sets nil
   "An alist of service sets.")
 
-(defconst prodigy-set-executor-prefix "prodigy-set-executor"
-  "Prodigy executor prefix.")
+(defconst prodigy-set-strategy-prefix "prodigy-set-strategy"
+  "Prodigy strategy prefix.")
 
 
-(defun* prodigy-set-define-set (&key name executor services &allow-other-keys)
+(defun* prodigy-set-define-set (&key name strategy services &allow-other-keys)
   "Define a service set that will start and stop services."
   (lexical-let ((object
        (list
         :name name
-        :executor executor
+        :strategy strategy
         :services services)))
     (setq prodigy-set-sets
        (append
@@ -170,17 +170,17 @@
                      :test name-test)))))))
     (funcall recurser service (list))))
 
-(defun prodigy-set-executor (set)
-  "Find executor for SET."
-  (lexical-let* ((executor-symbol (plist-get set :executor))
-                 (executor-stop-name
+(defun prodigy-set-strategy (set)
+  "Find strategy for SET."
+  (lexical-let* ((strategy-symbol (plist-get set :strategy))
+                 (strategy-stop-name
                   (format "%s--%s"
-                          prodigy-set-executor-prefix
-                          (symbol-name executor-symbol))))
-    (intern executor-stop-name)))
+                          prodigy-set-strategy-prefix
+                          (symbol-name strategy-symbol))))
+    (intern strategy-stop-name)))
 
 
-(defun prodigy-set-executor--parallel-starter (this-subservices callback)
+(defun prodigy-set-strategy--parallel-starter (this-subservices callback)
   "Start subservices in parallel.
 This needs to be a global function to work with prodigy callbacks"
   (if (null this-subservices)
@@ -190,18 +190,18 @@ This needs to be a global function to work with prodigy callbacks"
             nil)
         (prodigy-refresh))
     (if (prodigy-service-started-p (car this-subservices))
-        (prodigy-set-executor--parallel-starter
+        (prodigy-set-strategy--parallel-starter
          (cdr this-subservices)
          callback)
       (prodigy-start-service (car this-subservices)
         (lexical-let ((this-subservices this-subservices)
                       (callback callback))
           (lambda ()
-            (prodigy-set-executor--parallel-starter
+            (prodigy-set-strategy--parallel-starter
              (cdr this-subservices)
              callback)))))))
 
-(defun prodigy-set-executor--parallel-stopper (this-subservices callback)
+(defun prodigy-set-strategy--parallel-stopper (this-subservices callback)
   "Stop subservices in parallel"
   (if (null this-subservices)
       (prog1
@@ -210,25 +210,25 @@ This needs to be a global function to work with prodigy callbacks"
             nil)
         (prodigy-refresh))
     (if (not (prodigy-service-started-p (car this-subservices)))
-        (prodigy-set-executor--parallel-stopper
+        (prodigy-set-strategy--parallel-stopper
          (cdr this-subservices)
          callback)
       (prodigy-stop-service (car this-subservices) t
         (lexical-let ((this-subservices this-subservices)
             (callback callback))
           (lambda ()
-            (prodigy-set-executor--parallel-stopper
+            (prodigy-set-strategy--parallel-stopper
              (cdr this-subservices)
              callback)))))))
 
-(defun prodigy-set-executor--parallel (set _service action _status callback)
-  "Parallel service start executor."
+(defun prodigy-set-strategy--parallel (set _service action _status callback)
+  "Parallel service start strategy."
   (lexical-let ((subservices (prodigy-set-subservices set)))
     (pcase action
       ('start
-       (prodigy-set-executor--parallel-starter subservices callback))
+       (prodigy-set-strategy--parallel-starter subservices callback))
       ('stop
-       (prodigy-set-executor--parallel-stopper subservices callback))
+       (prodigy-set-strategy--parallel-stopper subservices callback))
       ('status
        nil))
     nil))
@@ -237,52 +237,57 @@ This needs to be a global function to work with prodigy callbacks"
 (defvar prodigy-set--sequential-state (make-hash-table :test 'equal)
   "State table for the sequential computation.")
 
-(defun prodigy-set-executor--sequential-starter (set this-service-entries callback)
+(defun prodigy-set-strategy--sequential-starter (set this-service-entries callback)
   "Start subservices in sequence."
   (if (null this-service-entries)
       (prog1
           (if (functionp callback)
               (funcall callback)
             nil)
+        (puthash (plist-get :name set) (list) prodigy-set--sequential-state)
         (prodigy-refresh))
     (pcase-let ((`(,service . ,target-status) (car this-service-entries)))
       (if (prodigy-service-started-p service)
-          (prodigy-set-executor--sequential-starter set
+          (prodigy-set-strategy--sequential-starter set
                                                     (cdr this-service-entries)
                                                     callback)
         (prodigy-start-service service)
         (lexical-let* ((set set)
-                       (this-service-entries this-service-entries)
-                       (callback callback)
-                       (set-name (plist-get set :name))
-                       (target-status (or target-status 'ready)))
-          (puthash set-name
-                   (plist-put (plist-put
-                               (gethash set-name prodigy-set--sequential-state)
-                               :step-callback
-                               (lambda ()
-                                 (prodigy-set-executor--sequential-starter
-                                  set
-                                  (cdr this-service-entries)
-                                  callback)))
-                              :target-status target-status)
-                   prodigy-set--sequential-state))))))
+            (this-service-entries this-service-entries)
+            (callback callback)
+            (set-name (plist-get set :name))
+            (target-status (or target-status 'ready)))
+          (if (null (cdr this-service-entries))
+              (prodigy-set-strategy--sequential-starter set
+                                                        nil
+                                                        callback)
+            (puthash set-name
+                     (plist-put (plist-put
+                                 (gethash set-name prodigy-set--sequential-state)
+                                 :step-callback
+                                 (lambda ()
+                                   (prodigy-set-strategy--sequential-starter
+                                    set
+                                    (cdr this-service-entries)
+                                    callback)))
+                                :target-status target-status)
+                     prodigy-set--sequential-state)))))))
 
-(defun prodigy-set-executor--sequential (set service action status callback)
-  "Sequential service start executor."
+(defun prodigy-set-strategy--sequential (set service action status callback)
+  "Sequential service start strategy."
   (lexical-let ((set-name (plist-get set :name)))
     (when (equal (gethash set-name prodigy-set--sequential-state 'nothing) 'nothing)
       (puthash set-name (list) prodigy-set--sequential-state)))
   (lexical-let* ((set-name (plist-get set :name))
-                 (this-state (gethash set-name prodigy-set--sequential-state)))
+      (this-state (gethash set-name prodigy-set--sequential-state)))
     (pcase action
       ('start
        (puthash set-name (list) prodigy-set--sequential-state)
-       (prodigy-set-executor--sequential-starter set
+       (prodigy-set-strategy--sequential-starter set
                                                  (prodigy-set-subservice-alist set)
                                                  callback))
       ('stop
-       (prodigy-set-executor--parallel set
+       (prodigy-set-strategy--parallel set
                                        service
                                        action
                                        status
@@ -318,35 +323,35 @@ This needs to be a global function to work with prodigy callbacks"
          (if (or prodigy-set--disable-advice
                 (not (prodigy-set-subservice-exist-p set)))
              (funcall orig-fun service callback)
-           (lexical-let ((set-executor (prodigy-set-executor set)))
+           (lexical-let ((set-strategy (prodigy-set-strategy set)))
              (let ((prodigy-set--disable-advice t))
-               (funcall set-executor set service 'start nil all-callback)))))
+               (funcall set-strategy set service 'start nil all-callback)))))
        sets))))
 
 (defun prodigy-set-stop-service (orig-fun service &optional force callback)
   "If a service is stop, stop the rest of them."
   (lexical-let* ((sets (prodigy-set-find-dependent-sets service))
-      (callback-counter 0)
-      (callback-length (length sets))
-      (callback callback)
-      (all-callback
-       (lambda ()
-         (setq callback-counter (1+ callback-counter))
-         (if (< callback-counter callback-length)
-             nil
-           (when (functionp callback)
-             (let ((prodigy-set--disable-advice nil))
-               (funcall callback)))))))
+                 (callback-counter 0)
+                 (callback-length (length sets))
+                 (callback callback)
+                 (all-callback
+                  (lambda ()
+                    (setq callback-counter (1+ callback-counter))
+                    (if (< callback-counter callback-length)
+                        nil
+                      (when (functionp callback)
+                        (let ((prodigy-set--disable-advice nil))
+                          (funcall callback)))))))
     (if (null sets)
         (funcall orig-fun service force callback)
       (mapc
        (lambda (set)
          (if (or prodigy-set--disable-advice
-                (not (prodigy-set-subservice-exist-p set)))
+                 (not (prodigy-set-subservice-exist-p set)))
              (funcall orig-fun service force callback)
-           (lexical-let ((set-executor (prodigy-set-executor set)))
+           (lexical-let ((set-strategy (prodigy-set-strategy set)))
              (let ((prodigy-set--disable-advice t))
-               (funcall set-executor set service 'stop nil all-callback)))))
+               (funcall set-strategy set service 'stop nil all-callback)))))
        sets))))
 
 (defun prodigy-set-change-status (service status)
@@ -355,12 +360,12 @@ This needs to be a global function to work with prodigy callbacks"
     (when sets
       (mapc
        (lambda (set)
-         (lexical-let ((set-executor (prodigy-set-executor set)))
+         (lexical-let ((set-strategy (prodigy-set-strategy set)))
            (if (or prodigy-set--disable-advice
-                  (not (prodigy-set-subservice-exist-p set)))
+                   (not (prodigy-set-subservice-exist-p set)))
                nil
              (let ((prodigy-set--disable-advice t))
-               (funcall set-executor set service 'status status nil)))))
+               (funcall set-strategy set service 'status status nil)))))
        sets))))
 
 (define-minor-mode prodigy-set-mode
